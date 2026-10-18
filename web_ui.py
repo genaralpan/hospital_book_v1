@@ -1,7 +1,7 @@
 """ChatGPT 风格的 Web UI（Gradio）。
 
 特性：
-- 左侧栏：多会话列表 / 新建对话 / 知识库上传与构建
+- 左侧栏：多会话列表 / 新建对话 / 删除会话 / 知识库上传、构建与删除
 - 主区：对话窗口 + 参考资料展示
 - 启动时自动加载已构建的知识库
 
@@ -74,11 +74,47 @@ def on_select(cid, conv_state):
     return chat, {"id": cid, "messages": data["messages"]}, ""
 
 
+def on_delete(cid, conv_state):
+    """删除下拉框中选中的会话。"""
+    if cid:
+        _cm.delete(cid)
+
+    choices = _list_choices()
+
+    if not cid or (conv_state and conv_state.get("id") == cid):
+        # 删除的是当前会话（或没有选中项）：主区重置为空白对话
+        return (
+            gr.update(choices=choices, value=None),
+            [],
+            {"id": None, "messages": []},
+            "",
+        )
+
+    # 删除的是其他会话：当前对话保持不变
+    return (
+        gr.update(choices=choices, value=conv_state.get("id")),
+        gr.update(),
+        conv_state,
+        gr.update(),
+    )
+
+
 def on_send(user_msg, chat_history, conv_state):
-    """发送消息：路由 → 生成 → 写入会话。"""
+    """发送第一步：用户消息立即上屏到对话窗口，并清空输入框。"""
     user_msg = (user_msg or "").strip()
     if not user_msg:
-        return chat_history, conv_state, "", gr.update()
+        return user_msg, chat_history, conv_state
+    chat_history = chat_history + [{"role": "user", "content": user_msg}]
+    return "", chat_history, conv_state
+
+
+def on_reply(chat_history, conv_state):
+    """发送第二步：路由 → 生成 → 写入会话。"""
+    # 最后一条不是待回复的用户消息（如空输入、重复触发）时不做任何事
+    if not chat_history or chat_history[-1]["role"] != "user":
+        return chat_history, conv_state, gr.update(), gr.update()
+
+    user_msg = chat_history[-1]["content"]
 
     # 尚未创建会话则先建一个
     if conv_state is None or not conv_state.get("id"):
@@ -107,10 +143,7 @@ def on_send(user_msg, chat_history, conv_state):
     title = _cm.generate_title(user_msg)
     _cm.save({"id": conv_state["id"], "title": title, "messages": conv_state["messages"]})
 
-    chat_history = chat_history + [
-        {"role": "user", "content": user_msg},
-        {"role": "assistant", "content": answer},
-    ]
+    chat_history = chat_history + [{"role": "assistant", "content": answer}]
     return (
         chat_history,
         conv_state,
@@ -143,6 +176,23 @@ def on_build_kb(file):
         return f"❌ 构建失败：{e}"
 
 
+def on_delete_kb(confirm):
+    """删除知识库：首次点击进入确认态，再次点击才真正删除（防误删）。"""
+    if not confirm:
+        return (
+            "⚠️ 删除后需重新上传 PDF 并构建才能恢复检索，再次点击按钮确认删除",
+            True,
+            gr.update(value="❗ 确认删除", variant="stop"),
+        )
+    try:
+        _kbm.delete()
+        _agent.rag_chain.set_retriever(None)  # 卸载检索器，退回无知识库状态
+        status = _kb_status()
+    except Exception as e:
+        status = f"❌ 删除失败：{e}"
+    return status, False, gr.update(value="🗑️ 删除知识库", variant="secondary")
+
+
 # ---------- UI 布局 ----------
 CUSTOM_CSS = """
 .gradio-container {max-width: 1200px !important;}
@@ -153,22 +203,29 @@ with gr.Blocks(title="医院药学知识助手") as demo:
     gr.Markdown("# 🏥 医院药学知识助手\n基于 RAG 的药品知识问答 · 查询改写 · 混合检索 · 记忆压缩 · 意图路由")
 
     conv_state = gr.State({"id": None, "messages": []})
+    kb_del_confirm = gr.State(False)  # 删除知识库的二次确认标记
 
     with gr.Row():
         # ---- 左侧栏 ----
         with gr.Column(scale=1, min_width=240, elem_id="sidebar"):
             new_btn = gr.Button("＋ 新建对话", variant="primary")
-            conv_dd = gr.Dropdown(
-                label="历史会话",
-                choices=_list_choices(),
-                interactive=True,
-                info="点击切换历史会话",
-            )
+            with gr.Row():
+                conv_dd = gr.Dropdown(
+                    label="历史会话",
+                    choices=_list_choices(),
+                    interactive=True,
+                    info="点击切换历史会话；🗑️ 删除选中会话",
+                    scale=5,
+                    min_width=140,
+                )
+                del_btn = gr.Button("🗑️ 删除", size="sm", scale=1, min_width=72)
 
             gr.Markdown("### 📚 知识库管理")
             kb_stat = gr.Textbox(_kb_status(), label="状态", interactive=False)
             pdf_file = gr.File(label="上传 PDF 手册", file_types=[".pdf"])
-            build_btn = gr.Button("🔨 构建知识库")
+            with gr.Row():
+                build_btn = gr.Button("🔨 构建知识库", size="sm")
+                del_kb_btn = gr.Button("🗑️ 删除知识库", size="sm")
 
         # ---- 主区 ----
         with gr.Column(scale=4):
@@ -189,19 +246,25 @@ with gr.Blocks(title="医院药学知识助手") as demo:
                 clear_btn = gr.Button("清空显示", scale=1)
 
     # ---- 事件绑定 ----
+    # 发送拆成两步：先把用户消息上屏并清空输入框，再生成回复，交互更即时
     send_inputs = [msg, chatbot, conv_state]
-    send_outputs = [chatbot, conv_state, sources_md, conv_dd]
+    send_outputs = [msg, chatbot, conv_state]
+    reply_outputs = [chatbot, conv_state, sources_md, conv_dd]
 
     send_btn.click(on_send, send_inputs, send_outputs).then(
-        lambda: gr.update(value=""), None, [msg]
+        on_reply, [chatbot, conv_state], reply_outputs
     )
     msg.submit(on_send, send_inputs, send_outputs).then(
-        lambda: gr.update(value=""), None, [msg]
+        on_reply, [chatbot, conv_state], reply_outputs
     )
 
     new_btn.click(on_new, None, [chatbot, conv_state, conv_dd, sources_md])
     conv_dd.change(on_select, [conv_dd, conv_state], [chatbot, conv_state, sources_md])
+    del_btn.click(on_delete, [conv_dd, conv_state], [conv_dd, chatbot, conv_state, sources_md])
     build_btn.click(on_build_kb, [pdf_file], [kb_stat])
+    del_kb_btn.click(
+        on_delete_kb, [kb_del_confirm], [kb_stat, kb_del_confirm, del_kb_btn]
+    )
     clear_btn.click(lambda: ([], ""), None, [chatbot, sources_md])
 
 

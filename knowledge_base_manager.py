@@ -1,7 +1,10 @@
 """知识库管理。
 
 PDF → 加载 → 清洗切分 → 向量化构建索引（混合检索）。
+支持删除已持久化的知识库。
 """
+
+import shutil
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -45,6 +48,11 @@ class KnowledgeBaseManager:
         chunks = self.split(docs, chunk_size, chunk_overlap)
         retriever = build_retriever(chunks, self.embeddings, top_k=config.RETRIEVER_TOP_K)
         return retriever, len(chunks)
+
+    def delete(self):
+        """删除已持久化的知识库（FAISS 索引 + 分块文件）。"""
+
+        shutil.rmtree(config.VECTOR_STORE_DIR, ignore_errors=True)
 
 
 if __name__ == "__main__":
