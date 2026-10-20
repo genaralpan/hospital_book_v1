@@ -3,12 +3,24 @@
 import json
 from pathlib import Path
 
+import jieba
 from langchain_community.vectorstores import FAISS
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 
 import config
 from rrf import reciprocal_rank_fusion
+
+jieba.setLogLevel(jieba.logging.WARNING)  # 静默「Building prefix dict」等日志
+
+
+def _tokenize_zh(text):
+    """BM25 用的中文分词（jieba 搜索引擎模式），过滤纯标点/空白 token。
+
+    默认的 text.split() 只按空格切，中文整句成一个 token，关键词检索完全失效。
+    注意：索引构建与查询切分必须共用这同一个函数。
+    """
+    return [t for t in jieba.lcut_for_search(text) if any(c.isalnum() for c in t)]
 
 
 class HybridRetriever:
@@ -19,10 +31,20 @@ class HybridRetriever:
         self.bm25 = bm25
         self.top_k = top_k or config.RETRIEVER_TOP_K
 
-    def retrieve(self, query):
-        faiss_docs = self.faiss.invoke(query)
-        bm25_docs = self.bm25.invoke(query)
-        return reciprocal_rank_fusion(faiss_docs, bm25_docs, k=self.top_k)
+    def retrieve(self, query, alt_query=None):
+        """双查询混合检索：主查询与备选查询各走「向量 + 关键词」两路，RRF 融合。
+
+        alt_query（通常是原始口语提问）作为兜底信号，降低查询改写质量波动对召回的影响。
+        """
+        ranked = []
+        for q in (query, alt_query):
+            if not q or not q.strip():
+                continue
+            ranked.append(self.faiss.invoke(q))
+            ranked.append(self.bm25.invoke(q))
+        if not ranked:
+            return []
+        return reciprocal_rank_fusion(*ranked, k=self.top_k, c=config.RRF_CONSTANT)
 
     def invoke(self, query):
         # 兼容 langchain retriever 接口
@@ -53,7 +75,7 @@ def build_retriever(docs, embeddings, top_k=None, save_dir=None):
         )
 
     faiss_retriever = vector_store.as_retriever(search_kwargs={"k": top_k})
-    bm25 = BM25Retriever.from_documents(docs)
+    bm25 = BM25Retriever.from_documents(docs, preprocess_func=_tokenize_zh)
     bm25.k = top_k
     return HybridRetriever(faiss_retriever, bm25, top_k=top_k)
 
@@ -81,7 +103,7 @@ def load_retriever(embeddings, top_k=None, save_dir=None):
         Document(page_content=c["content"], metadata=c.get("metadata", {}))
         for c in raw
     ]
-    bm25 = BM25Retriever.from_documents(docs)
+    bm25 = BM25Retriever.from_documents(docs, preprocess_func=_tokenize_zh)
     bm25.k = top_k
 
     return HybridRetriever(faiss_retriever, bm25, top_k=top_k)

@@ -99,11 +99,34 @@ def on_delete(cid, conv_state):
     )
 
 
+def _content_text(content):
+    """从 chatbot 消息的 content 中稳健提取纯文本。
+
+    Gradio 前端回传消息时可能把文本 content 包装成多部件列表，
+    如 [{"type": "text", "text": "..."}] 或 [("text", "...")]。
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("type") == "text":
+                parts.append(item.get("text") or "")
+            elif isinstance(item, (tuple, list)) and len(item) >= 2 and item[0] == "text":
+                parts.append(item[1] or "")
+        return "".join(parts)
+    return ""
+
+
 def on_send(user_msg, chat_history, conv_state):
     """发送第一步：用户消息立即上屏到对话窗口，并清空输入框。"""
     user_msg = (user_msg or "").strip()
     if not user_msg:
         return user_msg, chat_history, conv_state
+    # 暂存原文：State 原样序列化，不受 chatbot 组件回传格式转换影响
+    conv_state = {**(conv_state or {}), "pending": user_msg}
     chat_history = chat_history + [{"role": "user", "content": user_msg}]
     return "", chat_history, conv_state
 
@@ -114,7 +137,11 @@ def on_reply(chat_history, conv_state):
     if not chat_history or chat_history[-1]["role"] != "user":
         return chat_history, conv_state, gr.update(), gr.update()
 
-    user_msg = chat_history[-1]["content"]
+    # 优先取第一步暂存的原文；兜底从 chatbot 消息提取（content 可能被前端包装成列表）
+    conv_state = dict(conv_state or {})
+    user_msg = (conv_state.pop("pending", "") or _content_text(chat_history[-1]["content"])).strip()
+    if not user_msg:
+        return chat_history, conv_state, gr.update(), gr.update()
 
     # 尚未创建会话则先建一个
     if conv_state is None or not conv_state.get("id"):

@@ -38,11 +38,12 @@ class RAGChain:
     def answer(self, question, history=None):
         history = history or []
 
-        # 1) 查询改写：补全指代
+        # 1) 查询改写：补全指代 + 口语规范化
         rewritten = self.rewriter.rewrite(question, history)
 
-        # 2) 混合检索
-        docs = self._retrieve(rewritten)
+        # 2) 混合检索：改写查询为主、原始提问兜底，双路召回降低改写波动的影响
+        alt = question if question.strip() != rewritten.strip() else None
+        docs = self._retrieve(rewritten, alt_query=alt)
         sources = self.formatter.format(docs)
         context = (
             "\n\n".join(f"[资料{i + 1}] {d.page_content}" for i, d in enumerate(docs))
@@ -75,10 +76,10 @@ class RAGChain:
             "rewritten": rewritten,
         }
 
-    def _retrieve(self, query):
+    def _retrieve(self, query, alt_query=None):
         if self.retriever is None:
             return []
         try:
-            return self.retriever.retrieve(query)
+            return self.retriever.retrieve(query, alt_query=alt_query)
         except Exception:
             return []
