@@ -29,13 +29,22 @@ ENV/
 *.pem
 *.key
 
+# ===== Node / 前端 =====
+node_modules/
+frontend/dist/
+*.local
+
 # ===== 运行时生成的数据 =====
 # FAISS 向量索引 + 持久化分块（可由 PDF 重新构建）
 kb/vector_store/*
-!kb/vector_store/.gitkeep
+backend/kb/vector_store/*
+!backend/kb/vector_store/.gitkeep
+
+# 上传的 PDF 原件（构建知识库的临时落盘）
+backend/kb/uploads/
 
 # 会话记录（用户运行时数据）
-conversations/*.json
+backend/conversations/*.json
 
 # 原始 PDF 等数据文件（体积大 / 版权）
 data/
